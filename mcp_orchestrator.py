@@ -1,14 +1,39 @@
 import os
 import requests
 import sys
+import json
+
+# --------------------------------------------------
+# Environment Variables Provided by GitHub Actions
+# --------------------------------------------------
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 REPO = os.getenv("GITHUB_REPOSITORY")
-PR_NUMBER = os.getenv("GITHUB_REF").split("/")[-1]
 
-# -----------------------------
-# Step 1: Get PR Changed Files
-# -----------------------------
+
+# --------------------------------------------------
+# Extract PR Number Correctly (Important Fix)
+# --------------------------------------------------
+
+def get_pr_number():
+    event_path = os.getenv("GITHUB_EVENT_PATH")
+
+    if not event_path:
+        print("GITHUB_EVENT_PATH not found.")
+        sys.exit(1)
+
+    with open(event_path, "r") as f:
+        event_data = json.load(f)
+
+    return event_data["pull_request"]["number"]
+
+
+PR_NUMBER = get_pr_number()
+
+
+# --------------------------------------------------
+# Step 1: Get Changed Files from PR
+# --------------------------------------------------
 
 def get_pr_files():
     url = f"https://api.github.com/repos/{REPO}/pulls/{PR_NUMBER}/files"
@@ -19,12 +44,17 @@ def get_pr_files():
     }
 
     response = requests.get(url, headers=headers)
-    response.raise_for_status()
+
+    if response.status_code != 200:
+        print("Failed to fetch PR files:", response.text)
+        sys.exit(1)
+
     return response.json()
 
-# -----------------------------
-# Step 2: Extract C# Diffs
-# -----------------------------
+
+# --------------------------------------------------
+# Step 2: Extract Only C# Diffs
+# --------------------------------------------------
 
 def extract_csharp_diffs(files):
     diffs = []
@@ -35,9 +65,10 @@ def extract_csharp_diffs(files):
 
     return diffs
 
-# -----------------------------
-# Step 3: Static Rule Checks (MCP Step 1)
-# -----------------------------
+
+# --------------------------------------------------
+# Step 3: Static Checks (MCP Step 1)
+# --------------------------------------------------
 
 def static_checks(diff):
     issues = []
@@ -50,9 +81,10 @@ def static_checks(diff):
 
     return issues
 
-# -----------------------------
-# Step 4: Copilot Review (MCP Step 2)
-# -----------------------------
+
+# --------------------------------------------------
+# Step 4: Copilot Review (GitHub Models API)
+# --------------------------------------------------
 
 def review_with_copilot(diff):
 
@@ -90,13 +122,17 @@ Code:
     }
 
     response = requests.post(url, headers=headers, json=body)
-    response.raise_for_status()
+
+    if response.status_code != 200:
+        print("Copilot API error:", response.text)
+        sys.exit(1)
 
     return response.json()["choices"][0]["message"]["content"]
 
-# -----------------------------
-# Step 5: Post PR Comment
-# -----------------------------
+
+# --------------------------------------------------
+# Step 5: Post Comment Back to PR
+# --------------------------------------------------
 
 def post_comment(comment):
     url = f"https://api.github.com/repos/{REPO}/issues/{PR_NUMBER}/comments"
@@ -111,13 +147,20 @@ def post_comment(comment):
     }
 
     response = requests.post(url, headers=headers, json=body)
-    response.raise_for_status()
 
-# -----------------------------
-# Orchestrator (MCP Flow)
-# -----------------------------
+    if response.status_code != 201:
+        print("Failed to post comment:", response.text)
+        sys.exit(1)
+
+
+# --------------------------------------------------
+# MCP Orchestrator Flow
+# --------------------------------------------------
 
 def main():
+    print(f"Repository: {REPO}")
+    print(f"PR Number: {PR_NUMBER}")
+
     print("Fetching PR files...")
     files = get_pr_files()
 
@@ -132,11 +175,11 @@ def main():
 
     for diff in csharp_diffs:
 
-        # Static rules first
+        # Static rule engine
         static_issues = static_checks(diff)
         static_section = "\n".join([f"- {issue}" for issue in static_issues])
 
-        # Copilot intelligent review
+        # Copilot AI review
         copilot_review = review_with_copilot(diff)
 
         combined_review = f"""
