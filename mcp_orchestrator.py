@@ -1,19 +1,18 @@
 """
-AI C# Pull Request Reviewer
+AI C# Pull Request Reviewer – Principal Architect Governance Mode
 
-What this script does:
-----------------------
-This script runs inside GitHub Actions when a Pull Request is opened or updated.
+This script runs inside GitHub Actions when a PR is opened or updated.
 
 It performs:
-1. Fetches changed files from the PR.
-2. Filters C# (.cs) files.
-3. Performs static code smell detection.
-4. Checks whether unit tests are included in the PR.
-5. Sends sanitized diffs to Gemini AI for architectural review.
-6. Posts a structured enterprise-grade review comment back to the PR.
+1. PR clarity and intent validation
+2. Unit test presence detection
+3. Static code quality checks
+4. Principal-level architectural review
+5. Maintainability & scalability evaluation
+6. Structured actionable feedback
 
-This acts as an automated governance + AI-assisted review layer.
+Primary Focus:
+Clarity → Maintainability → Technical Soundness → Future Impact
 """
 
 import os
@@ -34,7 +33,6 @@ REPO = os.getenv("GITHUB_REPOSITORY")
 if not GITHUB_TOKEN or not OPENAI_API_KEY or not REPO:
     raise ValueError("Missing required environment variables.")
 
-# Gemini fallback models
 MODELS = [
     "gemini-1.5-flash-latest",
     "gemini-1.5-pro-latest",
@@ -42,16 +40,17 @@ MODELS = [
 ]
 
 # -------------------------
-# Get PR Number
+# Load PR Metadata
 # -------------------------
 
-def get_pr_number():
+def load_event_data():
     event_path = os.getenv("GITHUB_EVENT_PATH")
     with open(event_path, "r") as f:
-        event_data = json.load(f)
-    return event_data["pull_request"]["number"]
+        return json.load(f)
 
-PR_NUMBER = get_pr_number()
+event_data = load_event_data()
+PR_NUMBER = event_data["pull_request"]["number"]
+PR_DESCRIPTION = event_data["pull_request"].get("body", "No PR description provided.")
 
 # -------------------------
 # GitHub API
@@ -78,41 +77,22 @@ def post_comment(comment):
     response.raise_for_status()
 
 # -------------------------
-# Extract C# Diffs
-# -------------------------
-
-def extract_csharp_diffs(files):
-    return [
-        f["patch"]
-        for f in files
-        if f["filename"].endswith(".cs") and f.get("patch")
-    ]
-
-# -------------------------
-# Detect Unit Tests
+# Unit Test Detection
 # -------------------------
 
 def detect_unit_tests(files):
-    test_files = []
-
-    for file in files:
-        name = file["filename"].lower()
-
-        if name.endswith(".cs") and (
-            "test" in name or
-            "tests" in name or
-            name.endswith("tests.cs")
-        ):
-            test_files.append(file["filename"])
-
-    return test_files
+    return [
+        f["filename"]
+        for f in files
+        if f["filename"].lower().endswith(".cs")
+        and "test" in f["filename"].lower()
+    ]
 
 # -------------------------
-# Advanced Static Checks
+# Static Code Checks
 # -------------------------
 
 def static_checks(diff):
-
     issues = []
 
     if "async void" in diff:
@@ -127,78 +107,108 @@ def static_checks(diff):
     if "DateTime.Now" in diff:
         issues.append("Use DateTime.UtcNow instead of DateTime.Now.")
 
-    if "TODO" in diff or "FIXME" in diff:
-        issues.append("TODO/FIXME found in code.")
-
-    if re.search(r'public class \w+ \{(.|\n){2000,}', diff):
-        issues.append("Potential large class detected. Consider refactoring.")
-
-    if diff.count("{") != diff.count("}"):
-        issues.append("Brace mismatch detected.")
-
-    if re.search(r'public async Task \w+\(', diff) and "Async" not in diff:
-        issues.append("Async method name should end with 'Async'.")
-
-    if "async" in diff and "CancellationToken" not in diff:
+    if "CancellationToken" not in diff and "async" in diff:
         issues.append("Async method missing CancellationToken parameter.")
 
     if re.search(r'"[^"]{30,}"', diff):
         issues.append("Long hardcoded string detected.")
 
-    if "null" in diff and "?" not in diff:
-        issues.append("Potential null-handling issue detected.")
-
-    if "Controller" in diff and "ILogger" not in diff:
-        issues.append("Controller without ILogger detected.")
-
     return issues
 
 # -------------------------
-# Sanitize Secrets
+# Sanitize Diff
 # -------------------------
 
 def sanitize_diff(diff):
-    diff = re.sub(r'password\s*=\s*".*?"',
+    return re.sub(r'password\s*=\s*".*?"',
                   'password="***REDACTED***"',
                   diff,
                   flags=re.IGNORECASE)
 
-    diff = re.sub(r'PRIVATE KEY.*?END PRIVATE KEY',
-                  '***REDACTED KEY***',
-                  diff,
-                  flags=re.DOTALL)
-
-    return diff
-
 # -------------------------
-# Gemini AI Review
+# Principal Architect AI Review
 # -------------------------
 
 def review_with_ai(diff):
 
-    if "PRIVATE KEY" in diff or "password" in diff.lower():
-        return "⚠️ Potential secret detected. Manual review required."
-
     prompt = f"""
-You are a Principal .NET Architect performing enterprise review.
+You are a Principal Software Architect reviewing a Pull Request.
 
-Evaluate:
-- SOLID violations
-- Clean Architecture compliance
-- Thread safety
-- Security risks
-- Performance concerns
-- Dependency Injection usage
-- Logging strategy
-- Unit testing gaps
+Your responsibility is not just to check correctness,
+but to verify whether a new engineer reading this PR clearly understands:
 
-Return:
-- Structured bullet points
-- Risk Level (Low/Medium/High)
-- Score /10
+- What problem is being solved
+- Why this change was needed
+- How the logic works
+- What assumptions were made
+- What impact this change has
 
-Code:
+PR Description:
+{PR_DESCRIPTION}
+
+Code Diff:
 {diff}
+
+🔎 Step 1: Understanding & Clarity Check
+Evaluate:
+- Purpose clarity
+- Is WHY explained?
+- Is ticket referenced?
+- Can new developer understand in 5–10 minutes?
+- Is business logic separated from technical logic?
+- Naming & structure quality
+
+🔎 Step 2: Technical Review
+Check:
+- SOLID principles
+- Clean architecture boundaries
+- Error handling
+- Edge cases
+- Performance
+- Security
+- Scalability
+
+🔎 Step 3: Maintainability & Future Impact
+Evaluate:
+- Extensibility
+- Coupling
+- Backward compatibility
+- Contract breaking risk
+
+🔎 Step 4: Provide feedback in EXACT format:
+
+1️⃣ Overall Understanding
+Is intent clear? (Yes/No + why)
+
+2️⃣ Clarity Issues
+Missing explanation:
+Confusing logic:
+Naming improvements:
+
+3️⃣ Technical Issues (Critical)
+Issue:
+Why it matters:
+Suggested fix:
+
+4️⃣ Improvements (Non-critical)
+Refactoring suggestion:
+Readability improvement:
+Performance suggestion:
+
+5️⃣ Security Concerns
+Risk:
+Recommendation:
+
+6️⃣ Final Verdict
+Approve / Request Changes
+Confidence Level (1–10)
+
+Important:
+- Do NOT just criticize
+- Always give actionable suggestions
+- Appreciate good implementation explicitly
+- Assume author is mid-level engineer
+- Focus on clarity and maintainability first
 """
 
     headers = {"Content-Type": "application/json"}
@@ -213,8 +223,8 @@ Code:
                 result = response.json()
                 return result["candidates"][0]["content"]["parts"][0]["text"]
 
-        except Exception as e:
-            print(f"Model {model} failed: {str(e)}")
+        except Exception:
+            pass
 
         time.sleep(1)
 
@@ -230,107 +240,61 @@ def main():
     print(f"PR Number: {PR_NUMBER}")
 
     files = get_pr_files()
-
-    csharp_diffs = extract_csharp_diffs(files)
     test_files = detect_unit_tests(files)
 
-    if not csharp_diffs:
-        print("No C# changes found.")
-        sys.exit(0)
+    review_sections = []
 
-    all_reviews = []
-
-    # ----------------------------------
-    # PR Summary Section
-    # ----------------------------------
-
-    summary_section = "### 📦 PR Summary\n\n"
-    summary_section += "Files Modified:\n"
-
+    # PR Summary
+    summary = "## 📦 PR Summary\n\n"
+    summary += f"### Description:\n{PR_DESCRIPTION}\n\n"
+    summary += "### Files Modified:\n"
     for f in files:
-        summary_section += f"- {f['filename']} (+{f['additions']} / -{f['deletions']})\n"
+        summary += f"- {f['filename']} (+{f['additions']} / -{f['deletions']})\n"
+    review_sections.append(summary)
 
-    all_reviews.append(summary_section)
-
-    # ----------------------------------
     # Unit Test Evaluation
-    # ----------------------------------
-
     if not test_files:
-        test_message = (
-            "## ❌ Unit Test Coverage Missing\n\n"
-            "No unit test files detected in this PR.\n\n"
-            "If business logic or controllers are modified, unit tests should be included.\n\n"
-            "### 🧪 Example xUnit Test Skeleton:\n"
-            "```csharp\n"
-            "using Xunit;\n\n"
-            "public class SampleTests\n"
-            "{\n"
-            "    [Fact]\n"
-            "    public void MethodName_ShouldReturnExpectedResult()\n"
-            "    {\n"
-            "        // Arrange\n"
-            "        var input = 5;\n\n"
-            "        // Act\n"
-            "        var result = input + 5;\n\n"
-            "        // Assert\n"
-            "        Assert.Equal(10, result);\n"
-            "    }\n"
-            "}\n"
-            "```\n"
+        review_sections.append(
+            "## ❌ Unit Tests Missing\n\n"
+            "No test files detected. If business logic changed, "
+            "please include unit tests (xUnit/NUnit recommended)."
         )
-        all_reviews.append(test_message)
     else:
-        all_reviews.append(
-            "## ✅ Unit Test Files Detected\n\n" +
+        review_sections.append(
+            "## ✅ Unit Tests Detected\n\n" +
             "\n".join([f"- {t}" for t in test_files])
         )
 
-    # ----------------------------------
-    # Per File Analysis
-    # ----------------------------------
-
-    for file in files:
-        if not file["filename"].endswith(".cs") or not file.get("patch"):
+    # Per C# File Review
+    for f in files:
+        if not f["filename"].endswith(".cs") or not f.get("patch"):
             continue
 
-        diff = file["patch"]
-        sanitized = sanitize_diff(diff[:15000])
-
-        # Explain what code likely does
-        explanation = (
-            f"## 📄 Analysis for `{file['filename']}`\n\n"
-            "### 🧠 What This Change Appears To Do:\n"
-            "This file modifies C# logic. Based on diff patterns, "
-            "it likely introduces or updates business logic, controller logic, "
-            "or service layer functionality.\n\n"
-        )
-
+        sanitized = sanitize_diff(f["patch"][:15000])
         static_issues = static_checks(sanitized)
 
         static_section = (
-            "\n".join([f"- {issue}" for issue in static_issues])
-            if static_issues else
-            "No obvious static issues found."
+            "\n".join([f"- {i}" for i in static_issues])
+            if static_issues else "No obvious static issues found."
         )
 
         ai_review = review_with_ai(sanitized)
 
-        combined = f"""
-{explanation}
+        review_sections.append(f"""
+---
 
-### 🔍 Static Analysis
+## 📄 Analysis: {f['filename']}
+
+### 🔍 Static Observations
 {static_section}
 
-### 🧠 AI Architectural Review
+### 🧠 Principal Architect Review
 {ai_review}
-"""
+""")
 
-        all_reviews.append(combined)
+    final_comment = "\n\n".join(review_sections)
 
-    final_review = "\n\n---\n\n".join(all_reviews)
-
-    post_comment(f"## 🤖 AI C# Enterprise Code Review\n\n{final_review}")
+    post_comment(f"## 🤖 AI Enterprise PR Review\n\n{final_comment}")
 
     print("Review posted successfully.")
 
