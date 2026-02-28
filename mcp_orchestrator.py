@@ -1,18 +1,11 @@
 """
-AI C# Pull Request Reviewer – Principal Architect Governance Mode
+AI C# Pull Request Reviewer – Human Readable Governance Mode
 
-This script runs inside GitHub Actions when a PR is opened or updated.
-
-It performs:
-1. PR clarity and intent validation
-2. Unit test presence detection
-3. Static code quality checks
-4. Principal-level architectural review
-5. Maintainability & scalability evaluation
-6. Structured actionable feedback
-
-Primary Focus:
-Clarity → Maintainability → Technical Soundness → Future Impact
+Focus:
+- Clarity
+- Maintainability
+- Severity-based issue grouping
+- Human-readable structured output
 """
 
 import os
@@ -30,27 +23,29 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 REPO = os.getenv("GITHUB_REPOSITORY")
 
-if not GITHUB_TOKEN or not OPENAI_API_KEY or not REPO:
+if not GITHUB_TOKEN or not REPO:
     raise ValueError("Missing required environment variables.")
 
-MODELS = [
-    "gemini-1.5-flash-latest",
-    "gemini-1.5-pro-latest",
-    "gemini-pro"
+# Ignore noise files
+IGNORE_PATTERNS = [
+    ".vs/",
+    ".suo",
+    ".v2",
+    ".vsidx",
+    ".dtbcache"
 ]
 
 # -------------------------
 # Load PR Metadata
 # -------------------------
 
-def load_event_data():
-    event_path = os.getenv("GITHUB_EVENT_PATH")
-    with open(event_path, "r") as f:
+def load_event():
+    with open(os.getenv("GITHUB_EVENT_PATH"), "r") as f:
         return json.load(f)
 
-event_data = load_event_data()
-PR_NUMBER = event_data["pull_request"]["number"]
-PR_DESCRIPTION = event_data["pull_request"].get("body", "No PR description provided.")
+event = load_event()
+PR_NUMBER = event["pull_request"]["number"]
+PR_DESCRIPTION = event["pull_request"].get("body", "No description provided.")
 
 # -------------------------
 # GitHub API
@@ -58,241 +53,168 @@ PR_DESCRIPTION = event_data["pull_request"].get("body", "No PR description provi
 
 def get_pr_files():
     url = f"https://api.github.com/repos/{REPO}/pulls/{PR_NUMBER}/files"
-    headers = {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github+json"
-    }
-    response = requests.get(url, headers=headers)
-    response.raise_for_status()
-    return response.json()
+    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
+    return requests.get(url, headers=headers).json()
 
 def post_comment(comment):
     url = f"https://api.github.com/repos/{REPO}/issues/{PR_NUMBER}/comments"
-    headers = {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github+json"
-    }
-    body = {"body": comment}
-    response = requests.post(url, headers=headers, json=body)
-    response.raise_for_status()
+    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
+    requests.post(url, headers=headers, json={"body": comment})
 
 # -------------------------
-# Unit Test Detection
+# Utility
 # -------------------------
 
-def detect_unit_tests(files):
-    return [
-        f["filename"]
-        for f in files
-        if f["filename"].lower().endswith(".cs")
-        and "test" in f["filename"].lower()
-    ]
+def should_ignore(filename):
+    return any(pattern in filename for pattern in IGNORE_PATTERNS)
 
 # -------------------------
-# Static Code Checks
+# Static Analysis with Severity
 # -------------------------
 
-def static_checks(diff):
-    issues = []
+def analyze_diff(diff):
+
+    critical = []
+    must = []
+    good = []
 
     if "async void" in diff:
-        issues.append("Avoid async void except for event handlers.")
+        critical.append("Avoid async void (can crash process).")
 
     if "catch (Exception)" in diff:
-        issues.append("Avoid catching generic Exception.")
+        must.append("Avoid catching generic Exception.")
 
     if "Console.WriteLine" in diff:
-        issues.append("Use ILogger instead of Console.WriteLine.")
+        must.append("Replace Console.WriteLine with ILogger.")
 
     if "DateTime.Now" in diff:
-        issues.append("Use DateTime.UtcNow instead of DateTime.Now.")
+        good.append("Use DateTime.UtcNow for timezone safety.")
+
+    if re.search(r'"[^"]{40,}"', diff):
+        good.append("Long hardcoded string detected (consider constant/config).")
 
     if "CancellationToken" not in diff and "async" in diff:
-        issues.append("Async method missing CancellationToken parameter.")
+        must.append("Async method missing CancellationToken.")
 
-    if re.search(r'"[^"]{30,}"', diff):
-        issues.append("Long hardcoded string detected.")
-
-    return issues
+    return critical, must, good
 
 # -------------------------
-# Sanitize Diff
-# -------------------------
-
-def sanitize_diff(diff):
-    return re.sub(r'password\s*=\s*".*?"',
-                  'password="***REDACTED***"',
-                  diff,
-                  flags=re.IGNORECASE)
-
-# -------------------------
-# Principal Architect AI Review
-# -------------------------
-
-def review_with_ai(diff):
-
-    prompt = f"""
-You are a Principal Software Architect reviewing a Pull Request.
-
-Your responsibility is not just to check correctness,
-but to verify whether a new engineer reading this PR clearly understands:
-
-- What problem is being solved
-- Why this change was needed
-- How the logic works
-- What assumptions were made
-- What impact this change has
-
-PR Description:
-{PR_DESCRIPTION}
-
-Code Diff:
-{diff}
-
-🔎 Step 1: Understanding & Clarity Check
-Evaluate:
-- Purpose clarity
-- Is WHY explained?
-- Is ticket referenced?
-- Can new developer understand in 5–10 minutes?
-- Is business logic separated from technical logic?
-- Naming & structure quality
-
-🔎 Step 2: Technical Review
-Check:
-- SOLID principles
-- Clean architecture boundaries
-- Error handling
-- Edge cases
-- Performance
-- Security
-- Scalability
-
-🔎 Step 3: Maintainability & Future Impact
-Evaluate:
-- Extensibility
-- Coupling
-- Backward compatibility
-- Contract breaking risk
-
-🔎 Step 4: Provide feedback in EXACT format:
-
-1️⃣ Overall Understanding
-Is intent clear? (Yes/No + why)
-
-2️⃣ Clarity Issues
-Missing explanation:
-Confusing logic:
-Naming improvements:
-
-3️⃣ Technical Issues (Critical)
-Issue:
-Why it matters:
-Suggested fix:
-
-4️⃣ Improvements (Non-critical)
-Refactoring suggestion:
-Readability improvement:
-Performance suggestion:
-
-5️⃣ Security Concerns
-Risk:
-Recommendation:
-
-6️⃣ Final Verdict
-Approve / Request Changes
-Confidence Level (1–10)
-
-Important:
-- Do NOT just criticize
-- Always give actionable suggestions
-- Appreciate good implementation explicitly
-- Assume author is mid-level engineer
-- Focus on clarity and maintainability first
-"""
-
-    headers = {"Content-Type": "application/json"}
-    body = {"contents": [{"parts": [{"text": prompt}]}]}
-
-    for model in MODELS:
-        try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={OPENAI_API_KEY}"
-            response = requests.post(url, headers=headers, json=body, timeout=60)
-
-            if response.status_code == 200:
-                result = response.json()
-                return result["candidates"][0]["content"]["parts"][0]["text"]
-
-        except Exception:
-            pass
-
-        time.sleep(1)
-
-    return "AI review unavailable."
-
-# -------------------------
-# Main Orchestrator
+# Main
 # -------------------------
 
 def main():
 
-    print(f"Repository: {REPO}")
-    print(f"PR Number: {PR_NUMBER}")
-
     files = get_pr_files()
-    test_files = detect_unit_tests(files)
+    review = []
 
-    review_sections = []
-
+    # -------------------------
     # PR Summary
-    summary = "## 📦 PR Summary\n\n"
-    summary += f"### Description:\n{PR_DESCRIPTION}\n\n"
-    summary += "### Files Modified:\n"
-    for f in files:
-        summary += f"- {f['filename']} (+{f['additions']} / -{f['deletions']})\n"
-    review_sections.append(summary)
+    # -------------------------
 
-    # Unit Test Evaluation
+    summary = "## 📦 PR Summary\n\n"
+    summary += f"### Description\n{PR_DESCRIPTION}\n\n"
+    summary += "### Relevant Files\n"
+
+    relevant_files = []
+
+    for f in files:
+        if not should_ignore(f["filename"]):
+            relevant_files.append(f["filename"])
+            summary += f"- {f['filename']}\n"
+
+    review.append(summary)
+
+    # -------------------------
+    # Unit Test Check
+    # -------------------------
+
+    test_files = [f for f in relevant_files if "test" in f.lower()]
+
     if not test_files:
-        review_sections.append(
-            "## ❌ Unit Tests Missing\n\n"
-            "No test files detected. If business logic changed, "
-            "please include unit tests (xUnit/NUnit recommended)."
+        review.append(
+            "## ❌ Unit Test Coverage\n\n"
+            "No test files detected.\n"
+            "If business logic changed, unit tests must be added."
         )
     else:
-        review_sections.append(
-            "## ✅ Unit Tests Detected\n\n" +
-            "\n".join([f"- {t}" for t in test_files])
+        review.append(
+            "## ✅ Unit Tests Present\n\n" +
+            "\n".join(test_files)
         )
 
-    # Per C# File Review
+    # -------------------------
+    # File Analysis
+    # -------------------------
+
     for f in files:
-        if not f["filename"].endswith(".cs") or not f.get("patch"):
+
+        if should_ignore(f["filename"]):
             continue
 
-        sanitized = sanitize_diff(f["patch"][:15000])
-        static_issues = static_checks(sanitized)
+        if not f["filename"].endswith(".cs"):
+            continue
 
-        static_section = (
-            "\n".join([f"- {i}" for i in static_issues])
-            if static_issues else "No obvious static issues found."
-        )
+        if not f.get("patch"):
+            continue
 
-        ai_review = review_with_ai(sanitized)
+        critical, must, good = analyze_diff(f["patch"])
 
-        review_sections.append(f"""
+        explanation = f"""
 ---
 
-## 📄 Analysis: {f['filename']}
+## 📄 File: {f['filename']}
 
-### 🔍 Static Observations
-{static_section}
+### 🔎 What This File Appears To Do
+Based on changes, this file modifies C# logic.
+If this introduces business logic or API endpoints,
+please ensure the PR description explains:
+- What problem is being solved
+- Why this change was required
+- What impact it has
 
-### 🧠 Principal Architect Review
-{ai_review}
-""")
+"""
 
-    final_comment = "\n\n".join(review_sections)
+        issues = ""
+
+        if critical:
+            issues += "### 🔴 Critical Issues (Must Fix Before Merge)\n"
+            for i in critical:
+                issues += f"- {i}\n"
+
+        if must:
+            issues += "\n### 🟠 Must Fix\n"
+            for i in must:
+                issues += f"- {i}\n"
+
+        if good:
+            issues += "\n### 🟢 Good To Have Improvements\n"
+            for i in good:
+                issues += f"- {i}\n"
+
+        if not critical and not must and not good:
+            issues += "\nNo major issues detected. 👍"
+
+        review.append(explanation + issues)
+
+    # -------------------------
+    # Final Verdict
+    # -------------------------
+
+    verdict = "\n---\n\n## 🧾 Final Verdict\n"
+
+    if "No description provided." in PR_DESCRIPTION:
+        verdict += "🔴 Request Changes\n"
+        verdict += "PR description is missing. Please explain:\n"
+        verdict += "- What problem is being solved\n"
+        verdict += "- Why this change is needed\n"
+        verdict += "- What impact this has\n"
+    else:
+        verdict += "🟠 Needs Improvement\n"
+        verdict += "Please address highlighted issues."
+
+    review.append(verdict)
+
+    final_comment = "\n".join(review)
 
     post_comment(f"## 🤖 AI Enterprise PR Review\n\n{final_comment}")
 
