@@ -240,22 +240,72 @@ def main():
 
     all_reviews = []
 
-    # Unit test evaluation
+    # ----------------------------------
+    # PR Summary Section
+    # ----------------------------------
+
+    summary_section = "### 📦 PR Summary\n\n"
+    summary_section += "Files Modified:\n"
+
+    for f in files:
+        summary_section += f"- {f['filename']} (+{f['additions']} / -{f['deletions']})\n"
+
+    all_reviews.append(summary_section)
+
+    # ----------------------------------
+    # Unit Test Evaluation
+    # ----------------------------------
+
     if not test_files:
-        all_reviews.append(
-            "❌ No unit test files detected in this PR.\n\n"
-            "If production code is modified, unit tests should be included "
-            "(xUnit / NUnit / MSTest recommended)."
+        test_message = (
+            "## ❌ Unit Test Coverage Missing\n\n"
+            "No unit test files detected in this PR.\n\n"
+            "If business logic or controllers are modified, unit tests should be included.\n\n"
+            "### 🧪 Example xUnit Test Skeleton:\n"
+            "```csharp\n"
+            "using Xunit;\n\n"
+            "public class SampleTests\n"
+            "{\n"
+            "    [Fact]\n"
+            "    public void MethodName_ShouldReturnExpectedResult()\n"
+            "    {\n"
+            "        // Arrange\n"
+            "        var input = 5;\n\n"
+            "        // Act\n"
+            "        var result = input + 5;\n\n"
+            "        // Assert\n"
+            "        Assert.Equal(10, result);\n"
+            "    }\n"
+            "}\n"
+            "```\n"
         )
+        all_reviews.append(test_message)
     else:
         all_reviews.append(
-            "✅ Unit test files detected:\n" +
+            "## ✅ Unit Test Files Detected\n\n" +
             "\n".join([f"- {t}" for t in test_files])
         )
 
-    for diff in csharp_diffs:
+    # ----------------------------------
+    # Per File Analysis
+    # ----------------------------------
 
+    for file in files:
+        if not file["filename"].endswith(".cs") or not file.get("patch"):
+            continue
+
+        diff = file["patch"]
         sanitized = sanitize_diff(diff[:15000])
+
+        # Explain what code likely does
+        explanation = (
+            f"## 📄 Analysis for `{file['filename']}`\n\n"
+            "### 🧠 What This Change Appears To Do:\n"
+            "This file modifies C# logic. Based on diff patterns, "
+            "it likely introduces or updates business logic, controller logic, "
+            "or service layer functionality.\n\n"
+        )
+
         static_issues = static_checks(sanitized)
 
         static_section = (
@@ -267,10 +317,12 @@ def main():
         ai_review = review_with_ai(sanitized)
 
         combined = f"""
+{explanation}
+
 ### 🔍 Static Analysis
 {static_section}
 
-### 🧠 AI Review
+### 🧠 AI Architectural Review
 {ai_review}
 """
 
