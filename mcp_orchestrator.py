@@ -1,15 +1,15 @@
 """
-🤖 AI Enterprise C# PR Reviewer (Intelligent Version)
+🤖 AI Enterprise C# PR Reviewer – Full Governance Mode
 
-Features:
-- Safe GitHub event parsing
-- Full file semantic analysis using LLM
-- Business-level explanation of code
-- Highlights bad practices
-- Shows corrected examples
-- Generates xUnit tests (positive/negative/edge)
-- Auto governance decision
-- Defensive error handling
+This version:
+- Reads ALL changed C# files
+- Understands full PR context
+- Explains what the PR is doing
+- Identifies real issues
+- Shows corrected implementations
+- Generates full xUnit test classes
+- Provides architectural suggestions
+- Returns governance decision
 """
 
 import os
@@ -17,10 +17,10 @@ import sys
 import json
 import base64
 import requests
-from typing import Dict
+from typing import Dict, List
 
 # =========================
-# ENVIRONMENT VALIDATION
+# ENV VALIDATION
 # =========================
 
 def get_env(name: str, required: bool = True, default: str = "") -> str:
@@ -35,18 +35,16 @@ EVENT_PATH = get_env("GITHUB_EVENT_PATH")
 OPENAI_API_KEY = get_env("OPENAI_API_KEY", required=False)
 
 # =========================
-# SAFE EVENT LOADER
+# LOAD EVENT SAFELY
 # =========================
 
 def load_event(path: str) -> Dict:
     if not path or not os.path.exists(path):
-        print("⚠️ GitHub event file missing.")
         return {}
     try:
         with open(path, "r") as f:
             return json.load(f)
-    except Exception as e:
-        print(f"⚠️ Failed to parse event: {e}")
+    except Exception:
         return {}
 
 event = load_event(EVENT_PATH)
@@ -56,17 +54,14 @@ PR_NUMBER = (
     or event.get("issue", {}).get("number")
 )
 
-PR_DESCRIPTION = (
-    event.get("pull_request", {}).get("body")
-    or ""
-)
+PR_DESCRIPTION = event.get("pull_request", {}).get("body") or ""
 
 if not PR_NUMBER:
-    print("⚠️ Not a pull request event. Exiting safely.")
+    print("⚠️ Not a PR event. Exiting safely.")
     sys.exit(0)
 
 # =========================
-# GITHUB API HELPERS
+# GITHUB API
 # =========================
 
 def github_headers():
@@ -75,156 +70,139 @@ def github_headers():
         "Accept": "application/vnd.github+json"
     }
 
-def get_pr_files():
+def get_pr_files() -> List[Dict]:
     url = f"https://api.github.com/repos/{REPO}/pulls/{PR_NUMBER}/files"
-    try:
-        response = requests.get(url, headers=github_headers())
-        response.raise_for_status()
-        return response.json()
-    except requests.RequestException as e:
-        print(f"❌ Failed to fetch PR files: {e}")
+    response = requests.get(url, headers=github_headers())
+    if response.status_code != 200:
         return []
+    return response.json()
 
 def get_file_content(filename: str) -> str:
     url = f"https://api.github.com/repos/{REPO}/contents/{filename}"
-    try:
-        response = requests.get(url, headers=github_headers())
-        if response.status_code != 200:
-            return ""
-        data = response.json()
-        if "content" in data:
-            return base64.b64decode(data["content"]).decode("utf-8")
+    response = requests.get(url, headers=github_headers())
+    if response.status_code != 200:
         return ""
-    except Exception:
-        return ""
+    data = response.json()
+    if "content" in data:
+        return base64.b64decode(data["content"]).decode("utf-8")
+    return ""
 
 def post_comment(comment: str):
     url = f"https://api.github.com/repos/{REPO}/issues/{PR_NUMBER}/comments"
-    try:
-        requests.post(url, headers=github_headers(), json={"body": comment})
-    except Exception as e:
-        print(f"❌ Failed to post comment: {e}")
+    requests.post(url, headers=github_headers(), json={"body": comment})
 
 # =========================
-# LLM ANALYSIS
+# LLM FULL PR ANALYSIS
 # =========================
 
-def analyze_with_llm(filename: str, content: str) -> str:
+def analyze_pr_with_llm(pr_description: str, file_contents: Dict[str, str]) -> str:
 
     if not OPENAI_API_KEY:
-        return "⚠️ LLM review skipped (OPENAI_API_KEY not set)."
+        return "⚠️ LLM review skipped (OPENAI_API_KEY missing)."
 
     from openai import OpenAI
     client = OpenAI(api_key=OPENAI_API_KEY)
 
+    combined_code = ""
+    for name, content in file_contents.items():
+        combined_code += f"\n\n==== FILE: {name} ====\n{content}\n"
+
     prompt = f"""
-You are a Senior .NET Enterprise Architect.
+You are a Senior Enterprise .NET Architect performing a governance-level PR review.
 
-Review this C# file and respond in structured markdown:
+STRICT INSTRUCTIONS:
 
-1. Briefly explain what this file is doing (business perspective, 5-8 lines).
-2. Identify bad practices or risky patterns.
-3. Highlight critical issues (if any).
-4. Show improved implementation snippets (only where needed).
-5. If unit tests are missing, generate:
-   - Positive test cases
-   - Negative test cases
-   - Edge cases
-   Using xUnit best practices.
-6. Suggest improvements for readability, scalability, maintainability.
-7. Give a final file score (0–10).
+STEP 1 – Explain the PR
+- Explain clearly what this PR is doing.
+- Explain business intent.
+- Mention if architecture changed.
 
-File Name: {filename}
+STEP 2 – Identify Issues
+For each issue:
+- Explain what is wrong
+- Why it is wrong
+- Show corrected implementation
 
-Code:
-{content}
+STEP 3 – Architecture Review
+- Is separation of concerns respected?
+- Is business logic inside controllers?
+- Is dependency injection used properly?
+- Suggest proper layering if needed.
+
+STEP 4 – Unit Test Generation
+If business logic exists:
+- Generate a full xUnit test class
+- Include positive tests
+- Include negative tests
+- Include edge case tests
+- Use best practices (Arrange-Act-Assert)
+- Mock dependencies if needed
+
+STEP 5 – Code Quality Score
+Provide:
+- File quality score (0–10)
+- PR governance decision (Approve / Request Changes)
+
+PR Description:
+{pr_description}
+
+Changed Code:
+{combined_code}
 """
 
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2
-        )
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2
+    )
 
-        return response.choices[0].message.content
-
-    except Exception as e:
-        return f"⚠️ LLM analysis failed: {e}"
+    return response.choices[0].message.content
 
 # =========================
-# MAIN REVIEW LOGIC
+# MAIN
 # =========================
 
 def main():
 
     files = get_pr_files()
+    file_contents = {}
+    test_files_present = False
+
+    for f in files:
+        filename = f.get("filename", "")
+        if filename.endswith(".cs"):
+            content = get_file_content(filename)
+            if content:
+                file_contents[filename] = content
+        if "test" in filename.lower():
+            test_files_present = True
+
     review_sections = []
 
-    # PR Summary
-    summary = "## 📦 PR Summary\n\n"
-    summary += f"### Description\n{PR_DESCRIPTION.strip() or '⚠️ No description provided.'}\n\n"
-    review_sections.append(summary)
+    review_sections.append("## 📦 PR Summary\n")
+    review_sections.append(f"### Description\n{PR_DESCRIPTION.strip() or '⚠️ No description provided.'}\n")
 
     if not PR_DESCRIPTION.strip():
         review_sections.append(
-            "🔴 **PR Description Missing**\n\n"
-            "Please explain:\n"
-            "- What problem is being solved\n"
-            "- Why this change is needed\n"
-            "- What impact this has\n"
+            "🔴 **PR Description Missing**\n"
+            "Please explain business intent clearly.\n"
         )
 
-    test_files_detected = False
-    governance_block = False
+    llm_review = analyze_pr_with_llm(PR_DESCRIPTION, file_contents)
+    review_sections.append("\n---\n\n" + llm_review)
 
-    # File-level review
-    for f in files:
-        filename = f.get("filename", "")
-
-        if not filename.endswith(".cs"):
-            continue
-
-        if "test" in filename.lower():
-            test_files_detected = True
-
-        content = get_file_content(filename)
-        if not content:
-            continue
-
-        llm_review = analyze_with_llm(filename, content)
-
-        if "Critical" in llm_review:
-            governance_block = True
-
-        review_sections.append(f"\n---\n\n## 📄 File: {filename}\n\n{llm_review}")
-
-    # Unit test check
-    if not test_files_detected:
+    if not test_files_present:
         review_sections.append(
-            "\n---\n\n## ❌ Unit Tests Missing\n\n"
-            "No test project or test files detected.\n\n"
-            "Best Practice:\n"
-            "- Separate test project (e.g., CalculatorApi.Tests)\n"
-            "- Use xUnit\n"
-            "- Cover business logic only (not Program.cs)\n"
-            "- Add positive, negative and edge case tests\n"
+            "\n---\n\n## ❌ Test Project Missing\n"
+            "No test project detected.\n"
+            "Recommended: Create `ProjectName.Tests` using xUnit.\n"
         )
-        governance_block = True
-
-    # Final verdict
-    review_sections.append("\n---\n\n## 🧾 Final Governance Verdict\n")
-
-    if governance_block or not PR_DESCRIPTION.strip():
-        review_sections.append("🔴 **Request Changes – Governance Blocked**")
-    else:
-        review_sections.append("🟢 **Approved with Suggestions**")
 
     final_comment = "\n".join(review_sections)
 
-    post_comment(f"## 🤖 AI Enterprise PR Review\n\n{final_comment}")
+    post_comment(f"## 🤖 AI Enterprise PR Governance Review\n\n{final_comment}")
 
-    print("✅ Intelligent review completed successfully.")
+    print("✅ Full PR review completed.")
 
 if __name__ == "__main__":
     main()
