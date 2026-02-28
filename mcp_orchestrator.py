@@ -8,12 +8,12 @@ import json
 # -------------------------
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # Will store Gemini key here
 REPO = os.getenv("GITHUB_REPOSITORY")
 
 
 # -------------------------
-# Get PR Number Correctly
+# Get PR Number
 # -------------------------
 
 def get_pr_number():
@@ -72,52 +72,68 @@ def static_checks(diff):
     if "catch (Exception)" in diff:
         issues.append("Avoid catching generic Exception.")
 
+    if "Console.WriteLine" in diff:
+        issues.append("Avoid Console.WriteLine in production code. Use ILogger.")
+
+    if "DateTime.Now" in diff:
+        issues.append("Use DateTime.UtcNow instead of DateTime.Now.")
+
     return issues
 
 
 # -------------------------
-# OpenAI Review
+# Gemini AI Review
 # -------------------------
 
-def review_with_openai(diff):
+def review_with_ai(diff):
 
-    url = "https://api.openai.com/v1/chat/completions"
+    # Basic secret detection safeguard
+    if "PRIVATE KEY" in diff or "password" in diff.lower():
+        return "⚠️ Potential secret detected in diff. Manual review required."
 
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={OPENAI_API_KEY}"
 
     prompt = f"""
-You are a senior .NET architect performing enterprise code review.
+You are a senior .NET architect performing enterprise-grade code review.
 
 Review this C# diff for:
+
 - SOLID principle violations
 - Async/await misuse
 - Security risks
 - Performance concerns
 - Clean architecture violations
 - Logging & exception handling issues
+- Dependency injection mistakes
+- Thread-safety issues
 
-Return structured bullet points.
-Also give an overall score out of 10.
+Return:
+1) Structured bullet points
+2) Risk Level (Low / Medium / High)
+3) Overall score out of 10
 
-Code:
+Code Diff:
 {diff}
 """
 
     body = {
-        "model": "gpt-4o-mini",
-        "messages": [
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.2
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt}
+                ]
+            }
+        ]
+    }
+
+    headers = {
+        "Content-Type": "application/json"
     }
 
     response = requests.post(url, headers=headers, json=body)
     response.raise_for_status()
 
-    return response.json()["choices"][0]["message"]["content"]
+    return response.json()["candidates"][0]["content"]["parts"][0]["text"]
 
 
 # -------------------------
@@ -133,7 +149,7 @@ def post_comment(comment):
     }
 
     body = {
-        "body": f"## 🤖 AI C# Code Review\n\n{comment}"
+        "body": f"## 🤖 AI C# Enterprise Code Review\n\n{comment}"
     }
 
     response = requests.post(url, headers=headers, json=body)
@@ -162,7 +178,10 @@ def main():
         static_issues = static_checks(diff)
         static_section = "\n".join([f"- {issue}" for issue in static_issues])
 
-        ai_review = review_with_openai(diff)
+        # Chunk large diffs (Gemini large context but safer)
+        truncated_diff = diff[:15000]
+
+        ai_review = review_with_ai(truncated_diff)
 
         combined = f"""
 ### 🔍 Static Analysis
