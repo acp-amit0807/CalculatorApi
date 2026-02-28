@@ -1,32 +1,39 @@
 """
-AI C# Pull Request Reviewer – Human Readable Governance Mode
+AI C# Pull Request Reviewer – Enterprise Hardened Version
 
-Focus:
-- Clarity
-- Maintainability
-- Severity-based issue grouping
-- Human-readable structured output
+Enhancements:
+- Full None safety
+- GitHub event defensive parsing
+- API failure handling
+- Clean validation helpers
+- Testable functions
 """
 
 import os
 import requests
 import sys
 import json
-import time
 import re
+from typing import Tuple, List
 
 # -------------------------
-# Environment Variables
+# Environment Validation
 # -------------------------
 
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-REPO = os.getenv("GITHUB_REPOSITORY")
+def get_env(name: str, required: bool = True, default: str = "") -> str:
+    value = os.getenv(name, default)
+    if required and not value:
+        raise ValueError(f"Missing required environment variable: {name}")
+    return value or default
 
-if not GITHUB_TOKEN or not REPO:
-    raise ValueError("Missing required environment variables.")
+GITHUB_TOKEN = get_env("GITHUB_TOKEN")
+REPO = get_env("GITHUB_REPOSITORY")
+EVENT_PATH = get_env("GITHUB_EVENT_PATH")
 
-# Ignore noise files
+# -------------------------
+# Ignore Patterns
+# -------------------------
+
 IGNORE_PATTERNS = [
     ".vs/",
     ".suo",
@@ -36,47 +43,90 @@ IGNORE_PATTERNS = [
 ]
 
 # -------------------------
-# Load PR Metadata
+# Safe Event Loader
 # -------------------------
 
-def load_event():
-    with open(os.getenv("GITHUB_EVENT_PATH"), "r") as f:
-        return json.load(f)
+def load_event(path: str) -> dict:
+    if not path or not os.path.exists(path):
+        print("⚠️ GitHub event file missing.")
+        return {}
 
-event = load_event()
-PR_NUMBER = event["pull_request"]["number"]
-PR_DESCRIPTION = event["pull_request"].get("body", "No description provided.")
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"⚠️ Failed to parse GitHub event: {e}")
+        return {}
+
+event = load_event(EVENT_PATH)
+
+PR_NUMBER = (
+    event.get("pull_request", {}).get("number")
+    or event.get("issue", {}).get("number")
+)
+
+PR_DESCRIPTION = (
+    event.get("pull_request", {}).get("body")
+    or ""
+)
+
+if not PR_NUMBER:
+    print("⚠️ No PR number found. Exiting safely.")
+    sys.exit(0)
 
 # -------------------------
-# GitHub API
+# GitHub API (Safe)
 # -------------------------
 
-def get_pr_files():
+def github_headers():
+    return {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json"
+    }
+
+def get_pr_files() -> list:
     url = f"https://api.github.com/repos/{REPO}/pulls/{PR_NUMBER}/files"
-    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
-    return requests.get(url, headers=headers).json()
+    try:
+        response = requests.get(url, headers=github_headers())
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        print(f"❌ Failed to fetch PR files: {e}")
+        return []
 
-def post_comment(comment):
+def post_comment(comment: str):
     url = f"https://api.github.com/repos/{REPO}/issues/{PR_NUMBER}/comments"
-    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}"}
-    requests.post(url, headers=headers, json={"body": comment})
+    try:
+        response = requests.post(
+            url,
+            headers=github_headers(),
+            json={"body": comment}
+        )
+        response.raise_for_status()
+    except requests.RequestException as e:
+        print(f"❌ Failed to post comment: {e}")
 
 # -------------------------
 # Utility
 # -------------------------
 
-def should_ignore(filename):
+def should_ignore(filename: str) -> bool:
     return any(pattern in filename for pattern in IGNORE_PATTERNS)
 
+def is_pr_description_missing(desc: str) -> bool:
+    return not desc.strip()
+
 # -------------------------
-# Static Analysis with Severity
+# Static Analysis
 # -------------------------
 
-def analyze_diff(diff):
-
+def analyze_diff(diff: str) -> Tuple[List[str], List[str], List[str]]:
     critical = []
     must = []
     good = []
+
+    if not diff:
+        return critical, must, good
 
     if "async void" in diff:
         critical.append("Avoid async void (can crash process).")
@@ -93,7 +143,7 @@ def analyze_diff(diff):
     if re.search(r'"[^"]{40,}"', diff):
         good.append("Long hardcoded string detected (consider constant/config).")
 
-    if "CancellationToken" not in diff and "async" in diff:
+    if "async" in diff and "CancellationToken" not in diff:
         must.append("Async method missing CancellationToken.")
 
     return critical, must, good
@@ -107,25 +157,22 @@ def main():
     files = get_pr_files()
     review = []
 
-    # -------------------------
-    # PR Summary
-    # -------------------------
-
     summary = "## 📦 PR Summary\n\n"
-    summary += f"### Description\n{PR_DESCRIPTION}\n\n"
+    summary += f"### Description\n{PR_DESCRIPTION or '⚠️ No description provided.'}\n\n"
     summary += "### Relevant Files\n"
 
     relevant_files = []
 
     for f in files:
-        if not should_ignore(f["filename"]):
-            relevant_files.append(f["filename"])
-            summary += f"- {f['filename']}\n"
+        filename = f.get("filename", "")
+        if filename and not should_ignore(filename):
+            relevant_files.append(filename)
+            summary += f"- {filename}\n"
 
     review.append(summary)
 
     # -------------------------
-    # Unit Test Check
+    # Unit Test Detection
     # -------------------------
 
     test_files = [f for f in relevant_files if "test" in f.lower()]
@@ -148,36 +195,36 @@ def main():
 
     for f in files:
 
-        if should_ignore(f["filename"]):
+        filename = f.get("filename", "")
+        patch = f.get("patch")
+
+        if not filename or should_ignore(filename):
             continue
 
-        if not f["filename"].endswith(".cs"):
+        if not filename.endswith(".cs"):
             continue
 
-        if not f.get("patch"):
+        if not patch:
             continue
 
-        critical, must, good = analyze_diff(f["patch"])
+        critical, must, good = analyze_diff(patch)
 
         explanation = f"""
 ---
 
-## 📄 File: {f['filename']}
+## 📄 File: {filename}
 
-### 🔎 What This File Appears To Do
-Based on changes, this file modifies C# logic.
-If this introduces business logic or API endpoints,
-please ensure the PR description explains:
-- What problem is being solved
-- Why this change was required
-- What impact it has
-
+### 🔎 Clarity Check
+Ensure:
+- PR description explains intent
+- Complex logic is commented
+- Method names reflect business purpose
 """
 
         issues = ""
 
         if critical:
-            issues += "### 🔴 Critical Issues (Must Fix Before Merge)\n"
+            issues += "### 🔴 Critical Issues\n"
             for i in critical:
                 issues += f"- {i}\n"
 
@@ -187,11 +234,11 @@ please ensure the PR description explains:
                 issues += f"- {i}\n"
 
         if good:
-            issues += "\n### 🟢 Good To Have Improvements\n"
+            issues += "\n### 🟢 Improvements\n"
             for i in good:
                 issues += f"- {i}\n"
 
-        if not critical and not must and not good:
+        if not (critical or must or good):
             issues += "\nNo major issues detected. 👍"
 
         review.append(explanation + issues)
@@ -202,7 +249,7 @@ please ensure the PR description explains:
 
     verdict = "\n---\n\n## 🧾 Final Verdict\n"
 
-    if "No description provided." in PR_DESCRIPTION:
+    if is_pr_description_missing(PR_DESCRIPTION):
         verdict += "🔴 Request Changes\n"
         verdict += "PR description is missing. Please explain:\n"
         verdict += "- What problem is being solved\n"
@@ -218,7 +265,7 @@ please ensure the PR description explains:
 
     post_comment(f"## 🤖 AI Enterprise PR Review\n\n{final_comment}")
 
-    print("Review posted successfully.")
+    print("✅ Review completed successfully.")
 
 if __name__ == "__main__":
     main()
