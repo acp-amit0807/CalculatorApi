@@ -2,15 +2,22 @@ import os
 import requests
 import sys
 import json
+import time
 
 # -------------------------
 # Environment Variables
 # -------------------------
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # Will store Gemini key here
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # Gemini key stored here
 REPO = os.getenv("GITHUB_REPOSITORY")
 
+# Fallback models (priority order)
+MODELS = [
+    "gemini-1.5-flash-latest",
+    "gemini-1.5-pro-latest",
+    "gemini-pro"
+]
 
 # -------------------------
 # Get PR Number
@@ -73,7 +80,7 @@ def static_checks(diff):
         issues.append("Avoid catching generic Exception.")
 
     if "Console.WriteLine" in diff:
-        issues.append("Avoid Console.WriteLine in production code. Use ILogger.")
+        issues.append("Avoid Console.WriteLine in production. Use ILogger.")
 
     if "DateTime.Now" in diff:
         issues.append("Use DateTime.UtcNow instead of DateTime.Now.")
@@ -82,16 +89,14 @@ def static_checks(diff):
 
 
 # -------------------------
-# Gemini AI Review
+# Gemini AI Review with Fallback
 # -------------------------
 
 def review_with_ai(diff):
 
-    # Basic secret detection safeguard
+    # Secret detection safeguard
     if "PRIVATE KEY" in diff or "password" in diff.lower():
         return "⚠️ Potential secret detected in diff. Manual review required."
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={OPENAI_API_KEY}"
 
     prompt = f"""
 You are a senior .NET architect performing enterprise-grade code review.
@@ -116,6 +121,10 @@ Code Diff:
 {diff}
 """
 
+    headers = {
+        "Content-Type": "application/json"
+    }
+
     body = {
         "contents": [
             {
@@ -126,14 +135,28 @@ Code Diff:
         ]
     }
 
-    headers = {
-        "Content-Type": "application/json"
-    }
+    for model in MODELS:
+        try:
+            print(f"Trying model: {model}")
 
-    response = requests.post(url, headers=headers, json=body)
-    response.raise_for_status()
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={OPENAI_API_KEY}"
 
-    return response.json()["candidates"][0]["content"]["parts"][0]["text"]
+            response = requests.post(url, headers=headers, json=body, timeout=60)
+
+            if response.status_code == 200:
+                result = response.json()
+                return result["candidates"][0]["content"]["parts"][0]["text"]
+
+            else:
+                print(f"Model {model} failed: {response.status_code}")
+                print(response.text)
+
+        except Exception as e:
+            print(f"Error with model {model}: {str(e)}")
+
+        time.sleep(1)  # small delay before trying next model
+
+    return "❌ AI review failed. All Gemini models unreachable."
 
 
 # -------------------------
@@ -178,7 +201,7 @@ def main():
         static_issues = static_checks(diff)
         static_section = "\n".join([f"- {issue}" for issue in static_issues])
 
-        # Chunk large diffs (Gemini large context but safer)
+        # Safe truncation for large diffs
         truncated_diff = diff[:15000]
 
         ai_review = review_with_ai(truncated_diff)
@@ -195,8 +218,12 @@ def main():
 
     final_review = "\n\n---\n\n".join(all_reviews)
 
-    post_comment(final_review)
-    print("Review posted successfully.")
+    try:
+        post_comment(final_review)
+        print("Review posted successfully.")
+    except Exception as e:
+        print("Failed to post comment:", str(e))
+        sys.exit(1)
 
 
 if __name__ == "__main__":
