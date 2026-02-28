@@ -3,24 +3,21 @@ import requests
 import sys
 import json
 
-# --------------------------------------------------
-# Environment Variables Provided by GitHub Actions
-# --------------------------------------------------
+# -------------------------
+# Environment Variables
+# -------------------------
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 REPO = os.getenv("GITHUB_REPOSITORY")
 
 
-# --------------------------------------------------
-# Extract PR Number Correctly (Important Fix)
-# --------------------------------------------------
+# -------------------------
+# Get PR Number Correctly
+# -------------------------
 
 def get_pr_number():
     event_path = os.getenv("GITHUB_EVENT_PATH")
-
-    if not event_path:
-        print("GITHUB_EVENT_PATH not found.")
-        sys.exit(1)
 
     with open(event_path, "r") as f:
         event_data = json.load(f)
@@ -31,9 +28,9 @@ def get_pr_number():
 PR_NUMBER = get_pr_number()
 
 
-# --------------------------------------------------
-# Step 1: Get Changed Files from PR
-# --------------------------------------------------
+# -------------------------
+# Get PR Files
+# -------------------------
 
 def get_pr_files():
     url = f"https://api.github.com/repos/{REPO}/pulls/{PR_NUMBER}/files"
@@ -44,17 +41,13 @@ def get_pr_files():
     }
 
     response = requests.get(url, headers=headers)
-
-    if response.status_code != 200:
-        print("Failed to fetch PR files:", response.text)
-        sys.exit(1)
-
+    response.raise_for_status()
     return response.json()
 
 
-# --------------------------------------------------
-# Step 2: Extract Only C# Diffs
-# --------------------------------------------------
+# -------------------------
+# Extract C# Diffs
+# -------------------------
 
 def extract_csharp_diffs(files):
     diffs = []
@@ -66,9 +59,9 @@ def extract_csharp_diffs(files):
     return diffs
 
 
-# --------------------------------------------------
-# Step 3: Static Checks (MCP Step 1)
-# --------------------------------------------------
+# -------------------------
+# Static Checks
+# -------------------------
 
 def static_checks(diff):
     issues = []
@@ -82,17 +75,16 @@ def static_checks(diff):
     return issues
 
 
-# --------------------------------------------------
-# Step 4: Copilot Review (GitHub Models API)
-# --------------------------------------------------
+# -------------------------
+# OpenAI Review
+# -------------------------
 
-def review_with_copilot(diff):
+def review_with_openai(diff):
 
-    url = "https://api.github.com/models/gpt-4.1/chat/completions"
+    url = "https://api.openai.com/v1/chat/completions"
 
     headers = {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json"
     }
 
@@ -100,7 +92,6 @@ def review_with_copilot(diff):
 You are a senior .NET architect performing enterprise code review.
 
 Review this C# diff for:
-
 - SOLID principle violations
 - Async/await misuse
 - Security risks
@@ -116,23 +107,22 @@ Code:
 """
 
     body = {
+        "model": "gpt-4o-mini",
         "messages": [
             {"role": "user", "content": prompt}
-        ]
+        ],
+        "temperature": 0.2
     }
 
     response = requests.post(url, headers=headers, json=body)
-
-    if response.status_code != 200:
-        print("Copilot API error:", response.text)
-        sys.exit(1)
+    response.raise_for_status()
 
     return response.json()["choices"][0]["message"]["content"]
 
 
-# --------------------------------------------------
-# Step 5: Post Comment Back to PR
-# --------------------------------------------------
+# -------------------------
+# Post Comment to PR
+# -------------------------
 
 def post_comment(comment):
     url = f"https://api.github.com/repos/{REPO}/issues/{PR_NUMBER}/comments"
@@ -143,28 +133,22 @@ def post_comment(comment):
     }
 
     body = {
-        "body": f"## 🤖 Copilot MCP C# Code Review\n\n{comment}"
+        "body": f"## 🤖 AI C# Code Review\n\n{comment}"
     }
 
     response = requests.post(url, headers=headers, json=body)
-
-    if response.status_code != 201:
-        print("Failed to post comment:", response.text)
-        sys.exit(1)
+    response.raise_for_status()
 
 
-# --------------------------------------------------
-# MCP Orchestrator Flow
-# --------------------------------------------------
+# -------------------------
+# Orchestrator
+# -------------------------
 
 def main():
     print(f"Repository: {REPO}")
     print(f"PR Number: {PR_NUMBER}")
 
-    print("Fetching PR files...")
     files = get_pr_files()
-
-    print("Extracting C# diffs...")
     csharp_diffs = extract_csharp_diffs(files)
 
     if not csharp_diffs:
@@ -175,28 +159,24 @@ def main():
 
     for diff in csharp_diffs:
 
-        # Static rule engine
         static_issues = static_checks(diff)
         static_section = "\n".join([f"- {issue}" for issue in static_issues])
 
-        # Copilot AI review
-        copilot_review = review_with_copilot(diff)
+        ai_review = review_with_openai(diff)
 
-        combined_review = f"""
+        combined = f"""
 ### 🔍 Static Analysis
 {static_section if static_section else "No obvious static issues found."}
 
-### 🧠 Copilot AI Review
-{copilot_review}
+### 🧠 AI Review
+{ai_review}
 """
 
-        all_reviews.append(combined_review)
+        all_reviews.append(combined)
 
     final_review = "\n\n---\n\n".join(all_reviews)
 
-    print("Posting review comment...")
     post_comment(final_review)
-
     print("Review posted successfully.")
 
 
