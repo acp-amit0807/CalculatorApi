@@ -13,5 +13,4 @@ app.MapGet("/calculate", (double num1, double num2, string operation) =>
         _ => Results.BadRequest("Invalid operator")
     };
 });
-
 app.Run();
